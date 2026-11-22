@@ -1,71 +1,72 @@
-# SAIF STORE
+# saif-store-platform
 
-Premium fashion e-commerce storefront + admin dashboard built with React, Vite, TypeScript and Supabase. Black / warm off-white / red editorial brand identity.
+Full-stack apparel e-commerce storefront and admin console built with React, TypeScript, Vite, Tailwind CSS, and Supabase (PostgreSQL, Auth, RLS, Storage), verified with an offline PGlite PostgreSQL test suite.
 
-## Features
+## Engineering Highlights
 
-- **Storefront** — editorial fashion homepage (campaign hero, new drop, category tiles, best sellers, brand story, featured look), product listing with server-side filters + sorting, product detail pages with gallery/zoom, variants (size × color), reviews with moderation, wishlist, persistent stock-aware cart with drawer, debounced search with suggestions.
-- **Manual payments** — InstaPay & Vodafone Cash with receiving number `01040324811`. Customers upload a transfer screenshot (private Supabase Storage bucket); admins verify manually (approve / reject with reason / under review / cancel). Payments are never auto-approved.
-- **Atomic checkout** — the `place_order` RPC validates the cart against live stock with row locks, recomputes totals server-side, applies coupons, creates order + items + payment record + timeline event and reserves inventory in one transaction.
-- **Admin dashboard** — live KPIs, payment verification queue with zoomable screenshots, order management with timeline and internal notes, product management (variants, image manager, specs, duplication, bulk actions), inventory adjustments with an audit log, customers with real order stats, coupons, review moderation, sales analytics, and full site settings (payment number, method toggles, shipping, announcement, maintenance mode).
-- **Security** — role changes are blocked at the database level (column grants + trigger + RLS), payment screenshots are only accessible to their owner and admins, coupon codes are never exposed publicly.
+- **Atomic checkout RPC (`place_order`):** Validates line items against live inventory using row-level locks, recomputes subtotals, discounts, and shipping server-side, consumes coupons, reserves stock, and writes the order, order items, payment record, and timeline event inside a single PostgreSQL transaction.
+- **Manual payment verification state machine:** Supports Egyptian InstaPay and Vodafone Cash transfers. Customers upload payment receipts to a private Supabase Storage bucket; `submit_payment()` moves the record to `under_review`, and admins review receipts via `review_payment()` to approve, reject with a required reason (allowing resubmission), or cancel (automatically restoring reserved stock). Payments are never auto-approved.
+- **Database-enforced security boundaries:** Role privilege escalation is blocked at the PostgreSQL layer via column grants, triggers, and Row-Level Security. Payment proof files are readable only by their owner and verified admins, and coupon codes are never exposed to unauthenticated clients.
+- **In-process PostgreSQL integration tests (PGlite):** The Vitest suite (10 test files, 138 tests) executes the real `supabase/` SQL schema, RLS policies, functions, and upgrade migrations against `@electric-sql/pglite` (WebAssembly PostgreSQL) with mocked `auth`/`storage` schemas — verifying checkout atomicity, stock reservation/restoration, RLS tenant isolation, role-escalation defenses, and idempotent schema upgrades without external network dependencies.
 
-## Setup
+## Stack
 
-### 1. Supabase
+- **Frontend:** React 18, TypeScript, Vite, React Router 6, Tailwind CSS
+- **Backend / Data:** Supabase (PostgreSQL, Auth, Row-Level Security, Storage)
+- **Testing:** Vitest 4, React Testing Library, jsdom, `@electric-sql/pglite`
 
-**New project** — run `supabase/setup.sql` in the SQL Editor.
+## Project Structure
 
-**Existing project / Admin Dashboard broken?** — run, in this exact order:
-1. `supabase/diagnostics/check_schema.sql` — read-only state report (tells you which lineage your database is in)
-2. `supabase/migrations/2026-08-28-admin-reconcile.sql` — additive, idempotent; converges BOTH known lineages (original v1 and the sibling v2 where payments used `status` and `review_payment` took `p_action`)
-3. `supabase/functions.sql`
-4. `supabase/migrations/2026-08-29-bilingual-cms.sql` — bilingual content fields + homepage CMS
-5. `supabase/migrations/2026-08-30-fashion-storefront.sql` — **fashion storefront rebrand** (retires the legacy digital categories/rail, refreshes homepage CMS copy to the fashion campaign, reorders sections). Content-only, idempotent and fully reversible.
-6. `supabase/rls.sql`
-7. `supabase/diagnostics/verify_admin.sql` — read-only verification (every row should say OK)
-
-> **About the fashion migration** — it never deletes data: digital categories are deactivated (not removed), digital products are archived (`status='archived'`; bring them back with `UPDATE products SET status='active' WHERE product_type='digital';`), and homepage copy/section order is refreshed. Everything stays editable from **Admin → Site Builder / Settings** afterwards.
-
-The reconciliation never drops tables and never deletes rows; superseded duplicate payment rows are only *marked* cancelled. Re-running any step is safe.
-
-### 2. Environment
-
-```bash
-cp .env.example .env
-# fill in your project URL + publishable (anon) key
+```text
+src/
+├── pages/        # Storefront routes and /admin console views
+├── components/   # Storefront UI, cart drawer, product gallery, admin widgets
+├── context/      # Auth, cart, settings, and storefront state
+├── hooks/        # Data fetching, pagination, filters, and admin mutations
+├── i18n/         # Bilingual English / Arabic translations and RTL handling
+└── lib/          # Supabase client, pricing helpers, validation, constants
+supabase/
+├── schema.sql    # Core tables, constraints, and indexes
+├── functions.sql # Transactional RPCs (place_order, submit_payment, review_payment)
+├── rls.sql       # Row-Level Security policies and storage access rules
+├── setup.sql     # Consolidated initial setup script
+├── migrations/   # Incremental schema and CMS upgrades
+└── diagnostics/  # Schema and admin verification queries
+tests/            # Unit, jsdom render/route sweep, and PGlite DB integration suites
 ```
 
-### 3. Run
+## Local Setup
+
+1. Install dependencies:
 
 ```bash
 npm install
-npm run dev      # development
-npm run build    # production build (also type-checks)
-npm test         # unit + integration tests
 ```
 
-### 4. Create an admin
+2. Configure environment variables:
 
-Sign up normally, then promote yourself once in the SQL Editor:
+```bash
+cp .env.example .env
+# Set VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY
+```
+
+3. Apply `supabase/setup.sql` in a new Supabase project's SQL Editor (or run the incremental files under `supabase/migrations/` for existing databases).
+
+4. Create an admin user by registering normally, then promoting the profile in SQL:
 
 ```sql
 UPDATE profiles SET role = 'admin' WHERE email = 'you@example.com';
 ```
 
-(Regular users can never change roles — the database blocks it.)
+5. Run locally or execute verification checks:
 
-## Payments flow
+```bash
+npm run dev
+npm run lint     # TypeScript type-check (tsc --noEmit)
+npm test         # Unit, jsdom smoke, and PGlite PostgreSQL integration tests
+npm run build    # Type-check + production Vite bundle
+```
 
-1. Customer checks out → `place_order()` reserves stock and creates the order (`payment_review`) with a payment record (`awaiting_payment`).
-2. Customer transfers the exact total to the receiving number shown at checkout and uploads a screenshot → `submit_payment()` marks it `under_review`.
-3. Admin verifies in **Admin → Payment Verification** → `review_payment()` approves (order → `confirmed`), rejects (reason required, customer can resubmit) or cancels (stock is returned).
-4. Digital items get delivery details via `admin_set_fulfillment()`, visible to the customer only after payment approval.
+## License
 
-## Testing
-
-`npm test` runs:
-- unit tests (pricing, validation, payment state rules)
-- a jsdom smoke test (app renders with an unreachable backend)
-- **full database integration tests** — the real SQL files run on PGlite (PostgreSQL WASM) with Supabase `auth`/`storage` mocked: checkout atomicity, stock reservation & restore, coupon consumption, payment state transitions, RLS isolation, role-escalation protection and storage policies
-- the migration path from the previous schema (data survival + idempotency)
+[MIT](./LICENSE)
